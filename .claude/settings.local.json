@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python --version)",
+      "PowerShell(nvidia-smi --query-gpu=name,memory.total --format=csv 2>$null)",
+      "PowerShell(Get-Command conda -ErrorAction SilentlyContinue)",
+      "PowerShell(Get-Command py -ErrorAction SilentlyContinue)",
+      "PowerShell(py -0 2>$null)",
+      "PowerShell(& \"c:\\\\Users\\\\erid3\\\\Documents\\\\workspace\\\\RAG_RL\\\\.venv\\\\Scripts\\\\python.exe\" -m pip install --upgrade pip 2>&1)",
+      "PowerShell(& \"c:\\\\Users\\\\erid3\\\\Documents\\\\workspace\\\\RAG_RL\\\\.venv\\\\Scripts\\\\python.exe\" -m src.verify_env 2>&1)",
+      "Bash(./.venv/Scripts/python.exe -m src.verify_env)",
+      "Bash(\"c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe\" -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(\"c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe\" -c \"import torch; print\\('torch', torch.__version__\\); print\\('cuda avail', torch.cuda.is_available\\(\\)\\)\")",
+      "Bash(c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe -c 'import __TRACKED_VAR__; print\\(getattr\\(__TRACKED_VAR__, '\\\\''__version__'\\\\'', '\\\\''?'\\\\''\\)\\)')",
+      "Bash(c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe -m pip show sentence-transformers transformers tokenizers numpy)",
+      "Bash(c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe -c ' *)",
+      "Bash(c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe -m pip show pyarrow numpy pandas)",
+      "Bash(c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe -m pip install 'numpy<2')",
+      "Bash(c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe -m pip install 'pyarrow<18' 'pandas<3')",
+      "Bash(c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/python.exe -m pip install 'datasets<3' 'fsspec<=2024.6.1')",
+      "Bash(\"./.venv/Scripts/python.exe\" -m src.download_data)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/test_rewards.py -v)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/test_env.py -v)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m src.smoke_env)",
+      "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.smoke_env)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/ -v)",
+      "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.train_cartpole --seed 42 --max-episodes 500)",
+      "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.plot_cartpole)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -X utf8 -c ' *)",
+      "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.train_rag --seed 42 --n-episodes 10 --n-train 100 --use-llm --no-wandb)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest tests/ -q)",
+      "Bash(\"c:/Users/erid3/Documents/workspace/RAG_RL/.venv/Scripts/wandb.exe\" status *)",
+      "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.baselines.naive_rag --variant use_all --n 10)",
+      "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.summarize_baselines)",
+      "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.run_eval --variant rl --ckpt models/step_seed42_final.pt --n 20)",
+      "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.ask --mode hotpot --k 3 --pool-size 200)",
+      "Bash(mkdir -p \"c:/Users/erid3/Documents/workspace/RAG_RL/.vscode\" 2>&1)",
+      "Bash(powershell.exe -NoProfile -Command 'Write-Output $PROFILE')"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\erid3\\Documents\\workspace\\RAG_RL"
+    ]
+  }
+}
