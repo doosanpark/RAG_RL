@@ -272,9 +272,9 @@ class RAGEnv:
         mask = [False] * self.action_dim
         for i in range(N):
             if not self._processed[i]:
-                mask[i] = True             # keep_i
-                mask[N + i] = True         # drop_i
-        # 미처리 자리(action space는 self.n_candidates 기준)는 False 유지
+                mask[i] = True                       # keep_i
+                mask[self.n_candidates + i] = True   # drop_i (오프셋은 항상 n_candidates 기준)
+        # N < n_candidates인 샘플에서 존재하지 않는 단락 자리는 False 유지
         mask[2 * self.n_candidates] = True  # STOP
         return mask
 

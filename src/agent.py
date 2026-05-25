@@ -43,11 +43,14 @@ class PolicyNet(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """logits 반환. mask가 주어지면 False 위치를 -inf로 채움."""
+        """logits 반환. mask가 주어지면 False 위치를 큰 음수로 채움.
+
+        -inf 대신 -1e9를 쓰는 이유: BC cross-entropy / log_softmax에서 -inf가
+        섞이면 NaN 위험이 있어 산술적으로 안전한 큰 음수를 사용.
+        """
         logits = self.net(x)
         if mask is not None:
-            # mask: True가 유효 → False 자리는 -inf
-            logits = logits.masked_fill(~mask, float("-inf"))
+            logits = logits.masked_fill(~mask, -1e9)
         return logits
 
 
@@ -113,6 +116,7 @@ class REINFORCEAgent:
         hidden_dims: Sequence[int] = (256, 128),
         grad_clip: float = 1.0,
         normalize_advantage: bool = True,
+        weight_decay: float = 0.0,
         device: str = "cpu",
     ) -> None:
         self.device = torch.device(device)
@@ -123,8 +127,11 @@ class REINFORCEAgent:
 
         self.policy = PolicyNet(state_dim, n_actions, hidden_dims).to(self.device)
         self.value = ValueNet(state_dim, hidden_dims).to(self.device)
-        self.policy_opt = torch.optim.Adam(self.policy.parameters(), lr=lr_policy)
-        self.value_opt = torch.optim.Adam(self.value.parameters(), lr=lr_value)
+        # weight_decay(L2)로 raw 임베딩 과적합 억제
+        self.policy_opt = torch.optim.Adam(
+            self.policy.parameters(), lr=lr_policy, weight_decay=weight_decay)
+        self.value_opt = torch.optim.Adam(
+            self.value.parameters(), lr=lr_value, weight_decay=weight_decay)
 
     # ----- action 선택 -----
 
@@ -161,47 +168,61 @@ class REINFORCEAgent:
     # ----- update -----
 
     def update(self, transitions: List[Transition]) -> dict:
-        """한 trajectory로 policy + value 업데이트.
+        """단일 trajectory 업데이트 (하위호환). 내부적으로 batch 1개로 위임."""
+        return self.update_batch([transitions])
 
-        Returns:
-            로깅용 dict: policy_loss, value_loss, mean_return, mean_advantage, entropy
+    def update_batch(self, episodes: List[List[Transition]]) -> dict:
+        """여러 에피소드를 모아 한 번에 policy + value 업데이트.
+
+        - reward-to-go는 에피소드별로 따로 계산 (경계 넘어 누적 X)
+        - advantage 정규화는 배치 전체 transition 기준 → 짧은 에피소드에서도
+          통계가 안정적 (단일 에피소드 정규화의 노이즈 증폭 문제 해결)
+        - gradient는 배치 전체 평균 → variance 감소
+
+        Returns: 로깅용 dict
         """
-        T = len(transitions)
-        if T == 0:
-            return {"policy_loss": 0.0, "value_loss": 0.0}
+        # 비어있지 않은 에피소드만
+        episodes = [ep for ep in episodes if len(ep) > 0]
+        if not episodes:
+            return {"policy_loss": 0.0, "value_loss": 0.0, "mean_return": 0.0,
+                    "mean_advantage": 0.0, "entropy": 0.0}
 
-        # reward-to-go 계산 (역순 누적)
-        returns = torch.zeros(T, device=self.device)
-        running = 0.0
-        for t in reversed(range(T)):
-            running = transitions[t].reward + self.gamma * running
-            returns[t] = running
+        all_returns: List[torch.Tensor] = []
+        all_states: List[torch.Tensor] = []
+        all_log_probs: List[torch.Tensor] = []
 
-        states = torch.stack([tr.state.to(self.device) for tr in transitions])
-        log_probs = torch.stack([tr.log_prob for tr in transitions]).to(self.device)
+        for transitions in episodes:
+            T = len(transitions)
+            returns = torch.zeros(T, device=self.device)
+            running = 0.0
+            for t in reversed(range(T)):
+                running = transitions[t].reward + self.gamma * running
+                returns[t] = running
+            all_returns.append(returns)
+            all_states.append(torch.stack([tr.state.to(self.device) for tr in transitions]))
+            all_log_probs.append(torch.stack([tr.log_prob for tr in transitions]).to(self.device))
 
-        # baseline 추정
+        returns = torch.cat(all_returns)        # (sum T,)
+        states = torch.cat(all_states)          # (sum T, state_dim)
+        log_probs = torch.cat(all_log_probs)    # (sum T,)
+        n = returns.shape[0]
+
+        # baseline
         values = self.value(states)
         advantages = returns - values.detach()
 
-        if self.normalize_advantage and T > 1:
+        if self.normalize_advantage and n > 1:
             adv_std = advantages.std()
             if adv_std > 1e-8:
                 advantages = (advantages - advantages.mean()) / (adv_std + 1e-8)
 
-        # policy gradient
         policy_loss = -(log_probs * advantages).mean()
-
-        # value MSE (baseline의 학습 타깃은 정규화 안 한 raw return)
         value_loss = F.mse_loss(values, returns)
 
-        # entropy (로깅용)
         with torch.no_grad():
-            # 다시 forward해서 entropy 추정 (mask 무시 — 로깅 용도)
             logits = self.policy(states)
             entropy = Categorical(logits=logits).entropy().mean().item()
 
-        # backward + clip
         self.policy_opt.zero_grad()
         policy_loss.backward()
         nn.utils.clip_grad_norm_(self.policy.parameters(), self.grad_clip)
@@ -218,4 +239,27 @@ class REINFORCEAgent:
             "mean_return": float(returns.mean().item()),
             "mean_advantage": float(advantages.mean().item()),
             "entropy": entropy,
+            "n_episodes": len(episodes),
         }
+
+    def bc_update(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        masks: torch.Tensor,
+    ) -> float:
+        """Behavior cloning: expert action을 지도학습 (cross-entropy).
+
+        states (B, state_dim), actions (B,) long, masks (B, n_actions) bool.
+        policy만 업데이트 (value는 RL 단계에서 학습).
+        """
+        states = states.to(self.device)
+        actions = actions.to(self.device)
+        masks = masks.to(self.device)
+        logits = self.policy(states, masks)
+        loss = F.cross_entropy(logits, actions)
+        self.policy_opt.zero_grad()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.policy.parameters(), self.grad_clip)
+        self.policy_opt.step()
+        return float(loss.item())

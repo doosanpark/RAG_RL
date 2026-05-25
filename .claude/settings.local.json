@@ -35,7 +35,26 @@
       "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.run_eval --variant rl --ckpt models/step_seed42_final.pt --n 20)",
       "Bash(PYTHONIOENCODING=utf-8 \"./.venv/Scripts/python.exe\" -X utf8 -m src.ask --mode hotpot --k 3 --pool-size 200)",
       "Bash(mkdir -p \"c:/Users/erid3/Documents/workspace/RAG_RL/.vscode\" 2>&1)",
-      "Bash(powershell.exe -NoProfile -Command 'Write-Output $PROFILE')"
+      "Bash(powershell.exe -NoProfile -Command 'Write-Output $PROFILE')",
+      "Bash(cd \"c:/Users/erid3/Documents/workspace/RAG_RL\")",
+      "Bash(export PYTHONIOENCODING=utf-8)",
+      "Bash(nohup ./.venv/Scripts/python.exe -X utf8 -m src.train_rag --seed 42 --n-episodes 5000 --n-train 2000 --use-llm --no-wandb --log-every 50 --ckpt-every 1000)",
+      "Bash(echo \"started PID $!\")",
+      "Bash(tasklist)",
+      "Bash(taskkill /F /PID 22996 /PID 21144)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -u -X utf8 -m src.train_rag --seed 42 --n-episodes 5000 --n-train 2000 --use-llm --no-wandb --log-every 50 --ckpt-every 1000)",
+      "Bash(tee logs/train_step_seed42.log)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -u -X utf8 -m src.train_rag --seed 42 --n-episodes 120 --n-train 200 --use-oracle --no-wandb --log-every 20 --bc-warmup-samples 100 --bc-epochs 3 --batch-episodes 8)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -u -X utf8 -m src.train_rag --seed 42 --n-episodes 200 --n-train 300 --use-oracle --no-wandb --log-every 40 --bc-warmup-samples 300 --bc-epochs 30 --bc-lr 1e-3 --batch-episodes 8)",
+      "Bash(./.venv/Scripts/python.exe -m pytest tests/ -q)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -u -X utf8 -m src.train_rag --seed 42 --n-episodes 5000 --n-train 2000 --use-llm --no-wandb --log-every 50 --ckpt-every 1000 --bc-warmup-samples 500 --bc-epochs 30 --bc-lr 1e-3 --batch-episodes 8)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -u -X utf8 -m src.train_rag --seed 42 --n-episodes 40 --n-train 200 --use-oracle --no-wandb --log-every 20 --bc-warmup-samples 100 --bc-epochs 20 --batch-episodes 8 --dev-eval-every 0 --weight-decay 1e-4)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -X utf8 -c \"from src.state_encoder import expected_state_dim; print\\('lean dim =', expected_state_dim\\(\\)\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -u -X utf8 -m src.train_rag --seed 42 --n-episodes 24 --n-train 200 --use-oracle --no-wandb --log-every 12 --bc-warmup-samples 100 --bc-epochs 20 --batch-episodes 8 --dev-eval-every 0)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -X utf8 -m src.build_results)",
+      "Bash(./.venv/Scripts/python.exe -u -X utf8 -m src.train_rag --seed 7 --n-episodes 2500 --n-train 2000 --use-llm --no-wandb --log-every 250 --lr-policy 1e-4 --lr-value 1e-4 --gamma 0.99 --bc-warmup-samples 1000 --bc-epochs 30 --batch-episodes 8 --dev-eval-every 250 --dev-n 50 --ckpt-every 2500 --weight-decay 1e-4)",
+      "Bash(tee logs/train_step_seed7.log)",
+      "Bash(PYTHONIOENCODING=utf-8 ./.venv/Scripts/python.exe -X utf8 -m src.aggregate_results)"
     ],
     "additionalDirectories": [
       "c:\\Users\\erid3\\Documents\\workspace\\RAG_RL"

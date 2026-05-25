@@ -208,6 +208,35 @@ def test_max_steps_forces_done():
     assert info["total_steps"] == 3
 
 
+def test_fewer_than_10_passages_mask_aligned():
+    """N<10 샘플에서 valid_actions_mask가 어긋나지 않아야 한다 (회귀 테스트).
+
+    버그: drop 오프셋을 n_candidates 대신 실제 N으로 쓰면, N<10일 때
+    존재하지 않는 passage를 KEEP하려다 IndexError가 났다.
+    """
+    env = RAGEnv(n_candidates=10, max_steps=10, answerer=None)
+    sample = _make_sample(n_passages=8, n_gold=2)  # 8개짜리 샘플
+    state = env.reset(sample)
+    N = env.n_candidates  # action 디코딩 기준은 항상 10
+
+    # mask에서 valid라고 표시된 action은 모두 실제로 step 가능해야 함
+    valid_idx = [i for i, m in enumerate(state.valid_actions_mask) if m]
+    for a in valid_idx:
+        action = Action.from_index(a, N)
+        if action.passage_idx is not None:
+            # 유효하다고 표시된 passage_idx는 실제 존재 범위 안이어야
+            assert action.passage_idx < env.n_passages, (
+                f"action {a} → passage_idx {action.passage_idx} >= {env.n_passages}"
+            )
+
+    # 무작위로 끝까지 돌려도 IndexError가 안 나야 한다
+    done = False
+    while not done:
+        mask = env._valid_mask()
+        cand = [i for i, m in enumerate(mask) if m]
+        _, _, done, _ = env.step(cand[0])
+
+
 def test_step_after_done_raises():
     env = RAGEnv(n_candidates=10, max_steps=10, answerer=None)
     sample = _make_sample()

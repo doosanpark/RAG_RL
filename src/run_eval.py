@@ -99,6 +99,9 @@ def main() -> None:
                         help="rl variant: argmax(greedy) vs 확률 샘플링")
     parser.add_argument("--n", type=int, default=200)
     parser.add_argument("--split", type=str, default="validation")
+    parser.add_argument("--eval-file", type=str, default=None,
+                        help="로컬 HotpotQA-포맷 JSON 평가셋 (예: data/eval/sports.json). "
+                             "지정 시 HF hotpot_qa 대신 이 파일 사용 (cross-domain transfer).")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str,
                         default="cuda" if torch.cuda.is_available() else "cpu")
@@ -109,9 +112,20 @@ def main() -> None:
         parser.error("--variant rl 은 --ckpt 가 필요합니다")
 
     print(f"[setup] variant={args.variant} n={args.n} device={args.device}")
-    print("[data] HotpotQA load...")
-    ds = load_dataset("hotpot_qa", "distractor", trust_remote_code=True)
-    eval_ds = ds[args.split].shuffle(seed=args.seed).select(range(args.n))
+    if args.eval_file:
+        import random as _random
+        from .evaluate import load_local_eval
+        print(f"[data] 로컬 평가셋 로드: {args.eval_file}")
+        data = load_local_eval(args.eval_file)
+        _random.Random(args.seed).shuffle(data)
+        eval_ds = data[: args.n]
+        domain = Path(args.eval_file).stem
+        print(f"[data] {len(data)}개 중 {len(eval_ds)}개 평가 (domain={domain})")
+    else:
+        print("[data] HotpotQA load...")
+        ds = load_dataset("hotpot_qa", "distractor", trust_remote_code=True)
+        eval_ds = ds[args.split].shuffle(seed=args.seed).select(range(args.n))
+        domain = "hotpotqa"
 
     print("[llm] loading Qwen2.5-0.5B...")
     from .llm import QwenAnswerer
@@ -141,15 +155,18 @@ def main() -> None:
         ckpt_name = Path(args.ckpt).stem
         desc = f"rl_{ckpt_name}_{args.policy}"
 
-    print(f"\n=== evaluating: {desc} (n={args.n}) ===")
+    print(f"\n=== evaluating: {desc} on {domain} (n={len(eval_ds)}) ===")
     result = evaluate(fn, eval_ds, n_samples=args.n, desc=desc)
     result["variant"] = desc
-    result["n_eval"] = args.n
+    result["domain"] = domain
+    result["n_eval"] = len(eval_ds)
     if args.variant == "rl":
         result["ckpt"] = args.ckpt
         result["policy_mode"] = args.policy
 
-    out_path = RESULTS_DIR / f"eval_{desc}_n{args.n}.json"
+    # hotpotqa가 아니면 도메인을 파일명에 포함 (충돌 방지)
+    prefix = f"eval_{desc}" if domain == "hotpotqa" else f"eval_{domain}_{desc}"
+    out_path = RESULTS_DIR / f"{prefix}_n{len(eval_ds)}.json"
     out_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n[result] {desc}")
     print(f"  answer_F1   = {result['answer_f1']:.3f} ± {result['answer_f1_std']:.3f}")

@@ -144,9 +144,43 @@ tests/       unit test (env, reward) — 24개
 - [x] Phase 1: 환경 셋업 + 데이터 다운로드
 - [x] Phase 2: RAGEnv class + reward 함수 + unit test (24/24 green)
 - [x] Phase 3: REINFORCE+Baseline + CartPole sanity check (3 seeds 통과)
-- [ ] Phase 4: HotpotQA 본 학습 (3 seed) — 코드 완료, 학습 미실행
-- [~] Phase 5: baseline — Naive RAG(use_all/top_k/oracle/random) 평가 완료, Classification·Sparse RL 예정
-- [ ] Phase 6: 평가 + Table 1 + 보고서
+- [x] Phase 4: HotpotQA 본 학습 (3 seed, step + sparse) — BC warmup + lean state
+- [x] Phase 5: baseline — Naive RAG 4종 + Sparse RL (Classification은 범위 제외)
+- [x] Phase 6: Table 1 + 학습곡선 + 스포츠 transfer + **보고서([report.md](report.md))**
+
+## Phase 4 결과 (3 seeds: 42/123/7, validation n=200)
+
+| 방법 | answer_F1 | support_F1 | EM | avg_kept | 비고 |
+|:---|---:|---:|---:|---:|:---|
+| Oracle (정답 단락만) | 0.557 | 1.000 | 0.420 | 2.0 | 상한 |
+| Naive RAG (cosine top-3) | 0.370 | 0.582 | 0.280 | 3.0 | 학습 없는 강한 베이스라인 |
+| use_all | 0.367 | 0.340 | 0.275 | 9.9 | |
+| **Step-wise RL (제안)** | 0.355 ± 0.012 | 0.533 ± 0.005 | 0.262 | 2.0 | |
+| Sparse RL | 0.354 ± 0.002 | 0.512 ± 0.027 | 0.267 | 2.0 | ablation |
+| random | 0.275 | 0.258 | 0.200 | 3.0 | 하한 |
+
+곡선(3-seed mean±std): [results/learning_curves.png](results/learning_curves.png), 표: [results/table1_3seed.json](results/table1_3seed.json)
+
+**핵심 발견 (정직한 분석)**
+1. **일반화가 표현에 좌우됨**: 정책 입력에 raw 임베딩(4639-d)을 쓰면 train 과적합(dev F1 0.19 < cosine 0.37). cosine 유사도 기반 **lean state(32-d)**로 바꾸자 dev 일반화가 살아남(BC만으로 0.19→0.29, 학습 후 0.31~0.35).
+2. **H1 (step vs sparse) — 지지되지 않음**: 3 seed에서 answer_F1 **동률**(0.355 vs 0.354). 단일 seed(42)에서 보였던 step 우위는 noise였고 3 seed로 사라짐. 유일하게 견고한 관찰: **support_F1의 seed 간 분산이 step에서 훨씬 작음**(±0.005 vs ±0.027) — dense reward가 선택 품질을 더 *일관적*으로 만듦.
+3. **H2 (RL vs Naive)**: RL은 cosine 휴리스틱을 못 넘음(0.355 vs 0.370). 단 RL은 단락 2.0개만 keep해 cosine(3.0개)보다 **간결**하게 비슷한 F1 — precision 측면 이점.
+4. **reward hacking 진단**: BC warmup 없이 학습 시 정책이 "즉시 stop"으로 수렴(빈 컨텍스트 F1=0.149 → reward +0.20 정확 일치). BC warmup이 이 국소최적을 회피.
+5. **천장은 LLM**: oracle도 0.557 — frozen Qwen2.5-0.5B가 병목. selection 개선이 answer F1로 전이되지 않음.
+6. **REINFORCE 불안정성**: 학습이 dev F1에서 plateau 후 후반 drift → dev-best 체크포인트로 peak 보존.
+
+### Phase 4 재현 (3 seed)
+```powershell
+foreach ($s in 42,123,7) {
+  python -m src.train_rag --seed $s --n-episodes 2500 --use-llm --no-wandb `
+    --lr-policy 1e-4 --gamma 0.99 --bc-warmup-samples 1000 --batch-episodes 8 `
+    --dev-eval-every 250 --weight-decay 1e-4                       # step-wise
+  python -m src.train_rag --seed $s --no-step-reward ...같은옵션...  # sparse
+  python -m src.run_eval --variant rl --ckpt models/step_seed$s`_best.pt --n 200
+  python -m src.run_eval --variant rl --ckpt models/sparse_seed$s`_best.pt --n 200
+}
+python -m src.aggregate_results   # table1_3seed.json + learning_curves.png (mean±std)
+```
 
 ## 재현
 

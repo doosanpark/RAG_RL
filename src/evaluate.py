@@ -37,6 +37,43 @@ RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 AnswerFn = Callable[[Dict[str, Any]], Dict[str, Any]]
 
 
+def load_local_eval(path: str) -> List[Dict[str, Any]]:
+    """로컬 HotpotQA 원본(raw) JSON → HF datasets 형식(dict-of-lists)으로 변환.
+
+    원본 포맷:
+      supporting_facts: [[title, sent_id], ...]
+      context:          [[title, [sentences]], ...]
+      id 키:            _id
+    변환 후(우리 env/평가가 기대하는 형식):
+      supporting_facts: {"title": [...], "sent_id": [...]}
+      context:          {"title": [...], "sentences": [[...], ...]}
+    """
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    out: List[Dict[str, Any]] = []
+    for s in raw:
+        sf = s["supporting_facts"]
+        ctx = s["context"]
+        # 이미 HF 형식(dict)이면 그대로, raw 형식(list)이면 변환
+        if isinstance(sf, dict):
+            sf_conv = {"title": list(sf["title"]), "sent_id": list(sf["sent_id"])}
+        else:
+            sf_conv = {"title": [x[0] for x in sf], "sent_id": [x[1] for x in sf]}
+        if isinstance(ctx, dict):
+            ctx_conv = {"title": list(ctx["title"]), "sentences": list(ctx["sentences"])}
+        else:
+            ctx_conv = {"title": [c[0] for c in ctx], "sentences": [c[1] for c in ctx]}
+        out.append({
+            "id": s.get("_id", s.get("id", "")),
+            "question": s["question"],
+            "answer": s["answer"],
+            "type": s.get("type", "?"),
+            "level": s.get("level", "?"),
+            "supporting_facts": sf_conv,
+            "context": ctx_conv,
+        })
+    return out
+
+
 def compute_exact_match(pred: str, gold: str) -> float:
     return float(_normalize_answer(pred) == _normalize_answer(gold))
 

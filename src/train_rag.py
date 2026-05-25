@@ -77,6 +77,118 @@ def build_answerer(args, env: RAGEnv):
     return lambda q, kt: ""
 
 
+def expert_action_index(state, passages, n_candidates: int) -> int:
+    """BC용 expert 정책: 미처리 gold가 있으면 KEEP, 없으면 미처리 noise를 DROP,
+    둘 다 없으면 STOP. (gold 먼저 keep → noise drop → stop)
+    """
+    from .rl_types import Action, ActionKind
+
+    for i, p in enumerate(passages):
+        if not state.processed[i] and p.is_gold:
+            return Action(ActionKind.KEEP, i).to_index(n_candidates)
+    for i, p in enumerate(passages):
+        if not state.processed[i] and not p.is_gold:
+            return Action(ActionKind.DROP, i).to_index(n_candidates)
+    return Action(ActionKind.STOP).to_index(n_candidates)
+
+
+def collect_bc_data(env, encoder, samples, n_candidates: int = 10):
+    """expert를 env에서 굴려 (state_vec, action_idx, mask) 데이터 수집.
+
+    LLM 호출 불필요 (reward 안 씀) → answerer를 빈 함수로 둠.
+    """
+    states, actions, masks = [], [], []
+    env.answerer = lambda q, kt: ""  # BC엔 reward/답변 불필요
+    for sample in samples:
+        state = env.reset(sample)
+        encoded = encode_sample(encoder, env.passages, env.question, n_candidates_max=n_candidates)
+        done = False
+        while not done:
+            a = expert_action_index(state, env.passages, n_candidates)
+            sv = state_to_vector(state, encoded, max_steps=env.max_steps)
+            states.append(sv)
+            actions.append(a)
+            masks.append(state.valid_actions_mask)
+            state, _, done, _ = env.step(a)
+    return (
+        np.array(states, dtype=np.float32),
+        np.array(actions, dtype=np.int64),
+        np.array(masks, dtype=bool),
+    )
+
+
+def run_bc_warmup(agent, env, encoder, samples, epochs, batch_size,
+                  bc_lr=1e-3, n_candidates=10):
+    """behavior cloning으로 policy를 expert 행동에 미리 맞춤.
+
+    BC 전용 lr(기본 1e-3, RL lr보다 큼)을 써서 충분히 수렴시킨 뒤
+    원래 RL lr로 복원한다.
+    """
+    print(f"[bc] expert 데이터 수집 ({len(samples)} samples)...")
+    states, actions, masks = collect_bc_data(env, encoder, samples, n_candidates)
+    n = len(states)
+    print(f"[bc] {n} transitions 수집. {epochs} epoch 학습 (bc_lr={bc_lr})...")
+
+    # policy_opt lr을 BC용으로 임시 변경
+    orig_lrs = [g["lr"] for g in agent.policy_opt.param_groups]
+    for g in agent.policy_opt.param_groups:
+        g["lr"] = bc_lr
+
+    idx = np.arange(n)
+    rng = np.random.default_rng(0)
+    for ep in range(epochs):
+        rng.shuffle(idx)
+        losses = []
+        for s in range(0, n, batch_size):
+            b = idx[s:s + batch_size]
+            loss = agent.bc_update(
+                torch.from_numpy(states[b]),
+                torch.from_numpy(actions[b]),
+                torch.from_numpy(masks[b]),
+            )
+            losses.append(loss)
+        if (ep + 1) % max(1, epochs // 10) == 0 or ep == 0:
+            print(f"[bc] epoch {ep+1}/{epochs} ce_loss={np.mean(losses):.4f}")
+
+    # 원래 lr 복원
+    for g, lr in zip(agent.policy_opt.param_groups, orig_lrs):
+        g["lr"] = lr
+
+    # BC 직후 policy가 expert를 얼마나 따라하는지 train accuracy로 확인
+    with torch.no_grad():
+        st = torch.from_numpy(states).to(agent.device)
+        mk = torch.from_numpy(masks).to(agent.device)
+        logits = agent.policy(st, mk)
+        pred = logits.argmax(dim=-1).cpu().numpy()
+        acc = (pred == actions).mean()
+    print(f"[bc] expert-imitation train accuracy = {acc:.3f}")
+
+
+@torch.no_grad()
+def eval_dev_f1(agent, env, encoder, dev_samples, answerer, n_candidates=10):
+    """현재 정책(greedy)을 dev set에 굴려 평균 answer_F1 반환.
+
+    drift가 있어도 best 시점을 잡기 위한 용도.
+    answerer를 명시적으로 주입 (BC 데이터 수집이 env.answerer를 빈 함수로
+    바꿔놓기 때문에 반드시 실제 LLM answerer로 복원해야 함).
+    """
+    f1s = []
+    for sample in dev_samples:
+        state = env.reset(sample)
+        env.answerer = answerer  # 실제 LLM 강제 주입
+        encoded = encode_sample(encoder, env.passages, env.question, n_candidates_max=n_candidates)
+        done = False
+        info = {}
+        while not done:
+            sv = state_to_vector(state, encoded, max_steps=env.max_steps)
+            st = torch.from_numpy(sv).float()
+            mk = torch.tensor(state.valid_actions_mask, dtype=torch.bool)
+            a = agent.greedy_action(st, mk)
+            state, _, done, info = env.step(a)
+        f1s.append(info.get("answer_f1", 0.0))
+    return float(np.mean(f1s)) if f1s else 0.0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
@@ -104,6 +216,21 @@ def main() -> None:
     parser.add_argument("--use-step-reward", action="store_true", default=True,
                         help="step-wise reward 사용 (default True). Phase 5 sparse용으로 --no-step-reward")
     parser.add_argument("--no-step-reward", dest="use_step_reward", action="store_false")
+    parser.add_argument("--batch-episodes", type=int, default=8,
+                        help="이 개수만큼 에피소드를 모아 1회 업데이트 (variance 감소)")
+    parser.add_argument("--bc-warmup-samples", type=int, default=300,
+                        help="RL 전 behavior cloning warmup에 쓸 샘플 수 (0이면 비활성)")
+    parser.add_argument("--bc-epochs", type=int, default=30,
+                        help="BC warmup epoch 수")
+    parser.add_argument("--bc-batch-size", type=int, default=256)
+    parser.add_argument("--bc-lr", type=float, default=1e-3,
+                        help="BC 전용 학습률 (RL lr보다 크게)")
+    parser.add_argument("--dev-eval-every", type=int, default=250,
+                        help="dev F1 평가 간격 (episode). 0이면 비활성")
+    parser.add_argument("--dev-n", type=int, default=50,
+                        help="dev 평가 샘플 수 (validation split)")
+    parser.add_argument("--weight-decay", type=float, default=1e-4,
+                        help="optimizer L2 정규화 (과적합 억제)")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -125,7 +252,10 @@ def main() -> None:
     print(f"[data] HotpotQA train load ({args.n_train} samples)...")
     ds = load_dataset("hotpot_qa", "distractor", trust_remote_code=True)
     train = ds["train"].shuffle(seed=args.seed).select(range(args.n_train))
-    print(f"[data] loaded {len(train)} samples")
+    dev = None
+    if args.dev_eval_every > 0:
+        dev = ds["validation"].shuffle(seed=0).select(range(args.dev_n))
+    print(f"[data] loaded {len(train)} train" + (f", {len(dev)} dev" if dev is not None else ""))
 
     # ---------- env / encoder / answerer ----------
     print(f"[encoder] loading sentence-transformers (device={args.device})...")
@@ -147,8 +277,15 @@ def main() -> None:
         hidden_dims=(256, 128),
         grad_clip=1.0,
         normalize_advantage=True,
+        weight_decay=args.weight_decay,
         device=args.device,
     )
+
+    # ---------- BC warmup ----------
+    if args.bc_warmup_samples > 0:
+        bc_samples = [train[i] for i in range(min(args.bc_warmup_samples, len(train)))]
+        run_bc_warmup(agent, env, encoder, bc_samples, args.bc_epochs,
+                      args.bc_batch_size, bc_lr=args.bc_lr)
 
     # ---------- 학습 ----------
     window_R = deque(maxlen=100)
@@ -156,30 +293,42 @@ def main() -> None:
     window_gold_keep = deque(maxlen=100)
     action_counts = np.zeros(n_actions, dtype=np.int64)
     log_history: List[Dict[str, Any]] = []
+    force_zero_step = not args.use_step_reward
 
     rng = random.Random(args.seed)
     t_start = time.time()
+
+    episode_batch: List[List[Transition]] = []  # batch_episodes만큼 모아 업데이트
+    update_info: Dict[str, Any] = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
+    tag = "step" if args.use_step_reward else "sparse"
+    best_dev_f1 = -1.0
+    best_ckpt_path = MODELS_DIR / f"{tag}_seed{args.seed}_best.pt"
+
+    # BC 직후 dev F1 (RL이 BC 대비 개선/악화하는지 기준선)
+    if dev is not None:
+        bc_dev_f1 = eval_dev_f1(agent, env, encoder, dev, answerer)
+        print(f"[dev] BC 직후 dev_F1 = {bc_dev_f1:.4f}  (n={len(dev)})")
+        best_dev_f1 = bc_dev_f1
+        torch.save({"policy": agent.policy.state_dict(), "value": agent.value.state_dict(),
+                    "args": vars(args), "ep": 0, "dev_f1": bc_dev_f1}, best_ckpt_path)
 
     for ep in range(1, args.n_episodes + 1):
         sample = train[rng.randrange(len(train))]
         state = env.reset(sample)
 
-        # oracle/llm을 매 sample 기준으로 다시 만들어야 하는 경우
         if args.use_oracle:
             env.answerer = make_oracle_answerer_by_indices(env.passages, sample["answer"])
         else:
             env.answerer = answerer
 
-        # 사전 인코딩 (1회)
         encoded = encode_sample(encoder, env.passages, env.question, n_candidates_max=10)
-        # step reward 옵션
-        force_zero_step = not args.use_step_reward
 
         transitions: List[Transition] = []
         ep_reward = 0.0
-        ep_gold_keep = 0   # 정답 단락을 keep한 횟수
+        ep_gold_keep = 0
         n_gold_passages = sum(1 for p in env.passages if p.is_gold)
         done = False
+        info: Dict[str, Any] = {}
         while not done:
             sv = state_to_vector(state, encoded, max_steps=env.max_steps)
             state_t = torch.from_numpy(sv).float()
@@ -189,10 +338,8 @@ def main() -> None:
 
             next_state, reward, done, info = env.step(action_idx)
             if force_zero_step:
-                # Sparse RL ablation: 종료 step의 final만 남기고 step reward 제거
-                # info["step_reward"]를 빼면 final만 남음
-                step_r = info.get("step_reward", 0.0)
-                reward -= step_r
+                # Sparse RL ablation: step reward 제거, final만 남김
+                reward -= info.get("step_reward", 0.0)
             ep_reward += reward
             if info["action_kind"] == "keep" and info.get("is_gold"):
                 ep_gold_keep += 1
@@ -202,8 +349,11 @@ def main() -> None:
             )
             state = next_state
 
-        # update
-        update_info = agent.update(transitions)
+        episode_batch.append(transitions)
+        # batch_episodes만큼 모이면 업데이트
+        if len(episode_batch) >= args.batch_episodes:
+            update_info = agent.update_batch(episode_batch)
+            episode_batch = []
 
         # logging
         f1 = info.get("answer_f1", 0.0) if info else 0.0
@@ -249,9 +399,24 @@ def main() -> None:
                     step=ep,
                 )
 
+        # dev F1 평가 + best 체크포인트
+        if dev is not None and ep % args.dev_eval_every == 0:
+            dev_f1 = eval_dev_f1(agent, env, encoder, dev, answerer)
+            star = ""
+            if dev_f1 > best_dev_f1:
+                best_dev_f1 = dev_f1
+                torch.save({"policy": agent.policy.state_dict(),
+                            "value": agent.value.state_dict(),
+                            "args": vars(args), "ep": ep, "dev_f1": dev_f1}, best_ckpt_path)
+                star = " ★best"
+            print(f"  [dev ep{ep}] dev_F1={dev_f1:.4f} (best={best_dev_f1:.4f}){star}")
+            for h in log_history[::-1][:1]:
+                h["dev_f1"] = dev_f1
+            if run is not None:
+                run.log({"dev_f1": dev_f1, "best_dev_f1": best_dev_f1}, step=ep)
+
         # checkpoint
         if ep % args.ckpt_every == 0:
-            tag = "step" if args.use_step_reward else "sparse"
             ckpt = MODELS_DIR / f"{tag}_seed{args.seed}_ep{ep}.pt"
             torch.save(
                 {

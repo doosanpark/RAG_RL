@@ -81,6 +81,12 @@ class EncodedSample:
         self.passage_embs = passage_embs
         self.n_candidates_max = n_candidates_max
         self.emb_dim = emb_dim
+        # 단위벡터 (cosine 유사도 계산용 캐시)
+        self._q_unit = question_emb / (np.linalg.norm(question_emb) + 1e-9)
+        norms = np.linalg.norm(passage_embs, axis=1, keepdims=True)
+        self._p_unit = passage_embs / (norms + 1e-9)  # (N, D)
+        # question-passage cosine 유사도 (정적, 미리 계산)
+        self.q_sim = (self._p_unit @ self._q_unit).astype(np.float32)  # (N,)
 
 
 def encode_sample(
@@ -105,10 +111,18 @@ def encode_sample(
     )
 
 
+# state 표현 모드:
+#   "lean" (기본): per-candidate 일반화 feature만 (q_sim, kept_sim, processed) + global.
+#                  raw 임베딩 제거 → 암기 용량 없음 → cosine 수준으로 일반화.
+#   "full": 원래의 raw 임베딩 포함 표현 (과적합 ablation용).
+STATE_MODE = "lean"
+
+
 def state_to_vector(
     state: State,
     encoded: EncodedSample,
     max_steps: int = 10,
+    mode: str = STATE_MODE,
 ) -> np.ndarray:
     """RAGEnv State + 사전 인코딩 → MLP 입력 벡터 (1D)."""
     D = encoded.emb_dim
@@ -116,35 +130,62 @@ def state_to_vector(
 
     # kept mean-pool (없으면 0)
     if state.kept_indices:
-        # 패딩 영역은 안 골랐을 것이므로 안전
         kept_pool = encoded.passage_embs[state.kept_indices].mean(axis=0)
     else:
         kept_pool = np.zeros(D, dtype=np.float32)
 
-    # processed mask: 길이 N (passages 실제 개수만큼 채우고 나머지는 1로 두면
-    # "이미 처리됨"=무효 의미. 학습에 도움.)
+    # processed mask: 처리된 자리=1, 미처리=0, padding=1
     processed = np.ones(N, dtype=np.float32)
     n_real = len(state.passages)
     for i in range(n_real):
         processed[i] = 1.0 if state.processed[i] else 0.0
-    # padding 영역(n_real..N)은 1로 유지
 
     step_norm = np.array([state.step / max(1, max_steps)], dtype=np.float32)
 
-    # concat
-    vec = np.concatenate(
-        [
-            encoded.question_emb,           # D
-            kept_pool,                      # D
-            encoded.passage_embs.flatten(),  # N*D
-            processed,                       # N
-            step_norm,                       # 1
-        ],
-        axis=0,
-    )
+    # ----- 일반화 feature (핵심) -----
+    # q_sim: question-passage cosine 유사도 (정적). cosine 베이스라인의 신호.
+    q_sim = encoded.q_sim.copy()  # (N,)
+    # kept_sim: 누적 keep 평균과의 cosine 유사도 → 중복/신규성. 적응적 선택용.
+    kept_sim = np.zeros(N, dtype=np.float32)
+    if state.kept_indices:
+        kp_norm = kept_pool / (np.linalg.norm(kept_pool) + 1e-9)
+        kept_sim = (encoded._p_unit @ kp_norm).astype(np.float32)  # (N,)
+
+    if mode == "lean":
+        # per-candidate 일반화 신호 + global. raw 임베딩 없음 → 암기 불가.
+        n_kept = np.array([len(state.kept_indices) / max(1, N)], dtype=np.float32)
+        vec = np.concatenate(
+            [
+                q_sim,        # N  질문 관련성 (cosine 신호)
+                kept_sim,     # N  이미 keep한 것과의 중복도
+                processed,    # N  처리 여부
+                step_norm,    # 1
+                n_kept,       # 1
+            ],
+            axis=0,
+        )
+    else:  # full (ablation)
+        vec = np.concatenate(
+            [
+                encoded.question_emb,            # D
+                kept_pool,                       # D
+                encoded.passage_embs.flatten(),  # N*D
+                processed,                       # N
+                step_norm,                       # 1
+                q_sim,                           # N
+                kept_sim,                        # N
+            ],
+            axis=0,
+        )
     return vec.astype(np.float32)
 
 
-def expected_state_dim(n_candidates: int = 10, emb_dim: int = DEFAULT_EMB_DIM) -> int:
+def expected_state_dim(
+    n_candidates: int = 10, emb_dim: int = DEFAULT_EMB_DIM, mode: str = STATE_MODE
+) -> int:
     """MLP 초기화 시 쓸 state vector 차원."""
-    return 2 * emb_dim + n_candidates * emb_dim + n_candidates + 1
+    if mode == "lean":
+        # q_sim + kept_sim + processed + step + n_kept
+        return 3 * n_candidates + 2
+    # full: question + kept_pool + candidates_flat + processed + step + q_sim + kept_sim
+    return 2 * emb_dim + n_candidates * emb_dim + n_candidates + 1 + 2 * n_candidates
