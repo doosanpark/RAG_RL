@@ -9,6 +9,22 @@
 - **H2**: Step-wise RL > Classification baseline (왜 RL이 필요한가)
 - **H3**: HotpotQA로 학습한 정책이 보드게임 / 근로기준법으로 transfer 가능
 
+## 후속 — 해결책 A: 검색·추론을 LLM 안에 두기 (`src/sol_a/`)
+selection-only RL의 한계(추론 그릇 부재)를 공략해 **Qwen2.5-0.5B를 LoRA로 SFT→GRPO RL**
+파인튜닝(Search-R1 방식). 자세한 분석은 **[report_solution_a.md](report_solution_a.md)**.
+
+| 모델 | in-domain F1 | comparison | sports(transfer) |
+|---|---|---|---|
+| frozen-base (cold-start) | 0.006 | 0.007 | 0.005 |
+| 기존 frozen+cosine | 0.370 | – | 0.386 |
+| **SFT search** | 0.434 | 0.428 | 0.299 |
+| **RL (3-seed)** | **0.469±0.007** | **0.568±0.024** | 0.313±0.023 |
+
+- **in-domain: RL > SFT > cosine** (RL 이득 +0.035, seed std 0.007로 견고, comparison에 집중)
+- **transfer: Solution A < cosine** (도메인 과적합) — 단 RL ≥ SFT
+- cold-start 0.006 → SFT warmup 필수. 학습곡선: `results/sol_a_learning_curves.png`
+- 실행: `python -m src.sol_a.{sft_train,grpo_train,eval_a,aggregate_a}` (RL은 `--resume`로 이어하기)
+
 ## 알고리즘
 - **MDP**: State = (질문, 누적 keep 단락, 후보 단락, step), Action = {keep p_i, drop p_i, stop_and_answer}
 - **Reward (v4.2)**: 비대칭 step reward + 연속 F1 final reward

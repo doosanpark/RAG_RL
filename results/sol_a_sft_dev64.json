@@ -1,0 +1,29 @@
+{
+  "overall": {
+    "n": 64,
+    "f1": 0.4154265873015873,
+    "em": 0.3125,
+    "avg_search": 1.984375,
+    "has_ans": 1.0
+  },
+  "bridge": {
+    "n": 48,
+    "f1": 0.3631283068783069,
+    "em": 0.2708333333333333,
+    "avg_search": 1.9791666666666667,
+    "has_ans": 1.0
+  },
+  "comparison": {
+    "n": 16,
+    "f1": 0.5723214285714286,
+    "em": 0.4375,
+    "avg_search": 2.0,
+    "has_ans": 1.0
+  },
+  "_meta": {
+    "model": "models/sol_a/sft/best",
+    "dataset": "hotpot",
+    "n": 64,
+    "max_turns": 3
+  }
+}

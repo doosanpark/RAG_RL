@@ -1,0 +1,68 @@
+[
+  {
+    "step": 1,
+    "reward_f1": 0.125,
+    "em": 0.0,
+    "avg_search": 2.0,
+    "has_ans": 1.0,
+    "stop_answer": 1.0,
+    "pg": 0.0166015625,
+    "kl": 0.0003237724304199219,
+    "n_upd_seq": 4
+  },
+  {
+    "step": 2,
+    "reward_f1": 0.875,
+    "em": 0.875,
+    "avg_search": 2.0,
+    "has_ans": 1.0,
+    "stop_answer": 1.0,
+    "pg": -0.00616455078125,
+    "kl": 8.702278137207031e-05,
+    "n_upd_seq": 4
+  },
+  {
+    "step": 3,
+    "reward_f1": 0.0,
+    "em": 0.0,
+    "avg_search": 2.0,
+    "has_ans": 1.0,
+    "stop_answer": 1.0,
+    "pg": 0.0,
+    "kl": 0.0,
+    "n_upd_seq": 0
+  },
+  {
+    "step": 4,
+    "reward_f1": 0.375,
+    "em": 0.375,
+    "avg_search": 2.0,
+    "has_ans": 1.0,
+    "stop_answer": 1.0,
+    "pg": -0.02093505859375,
+    "kl": 0.00019437074661254883,
+    "n_upd_seq": 8
+  },
+  {
+    "step": 5,
+    "reward_f1": 0.25,
+    "em": 0.25,
+    "avg_search": 2.0,
+    "has_ans": 1.0,
+    "stop_answer": 1.0,
+    "pg": -0.015045166015625,
+    "kl": 0.0001227855682373047,
+    "n_upd_seq": 8
+  },
+  {
+    "step": 6,
+    "reward_f1": 0.5714285714285714,
+    "em": 0.5,
+    "avg_search": 2.0,
+    "has_ans": 1.0,
+    "stop_answer": 1.0,
+    "pg": 0.024658203125,
+    "kl": 0.00014859437942504883,
+    "n_upd_seq": 4
+  }
+]
