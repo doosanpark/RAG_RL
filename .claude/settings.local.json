@@ -85,7 +85,11 @@
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe -u -X utf8 -m src.sol_a.plot_curves)",
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe -u -X utf8 -m src.sol_a.plot_curves 2>$null; \"done\")",
       "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pip install python-docx --no-input 2>&1)",
-      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe -u -X utf8 -m src.sol_a.md_to_docx; if \\(Test-Path report_solution_a.docx\\) { \"size: $\\([math]::Round\\(\\(Get-Item report_solution_a.docx\\).Length/1KB,1\\)\\) KB\" })"
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe -u -X utf8 -m src.sol_a.md_to_docx; if \\(Test-Path report_solution_a.docx\\) { \"size: $\\([math]::Round\\(\\(Get-Item report_solution_a.docx\\).Length/1KB,1\\)\\) KB\" })",
+      "PowerShell(.\\\\.venv\\\\Scripts\\\\python.exe -m pip install python-pptx --no-input 2>&1)",
+      "Bash(iconv -f UTF-16 -t UTF-8 logs/rl_dump.log)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe -u -X utf8 -m src.sol_a.extract_cases)",
+      "Read(//c/Users/erid3/Documents/workspace/RAG_RL/**)"
     ],
     "additionalDirectories": [
       "c:\\Users\\erid3\\Documents\\workspace\\RAG_RL"
