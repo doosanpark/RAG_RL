@@ -44,3 +44,4 @@ logs/wandb_export/
 
 # Jupyter
 *.ipynb
+/.claude
