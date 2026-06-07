@@ -1,368 +1,338 @@
-# RAG-RL: Multi-hop QA를 강화학습으로 — 두 PART의 정직한 분석
+# RAG-RL: 강화학습 기반 Multi-hop QA 문서 선택
 
-**서강대학교 강화학습 프로젝트** · 박두산 (팀장) · A72058 신세정 (팀원)
-**GitHub**: https://github.com/doosanpark/RAG_RL
-
-> Multi-hop QA에서 강화학습이 무엇을 할 수 있는가? 두 PART에 걸쳐 정직하게 답한다.
->
-> - **PART 1 — selection-only RL** (REINFORCE+baseline). frozen LLM 옆에 작은 selector를 학습. cosine 휴리스틱을 못 넘고(0.355<0.370), transfer −24% 폭락. 진단: **"추론 용량(capacity)의 부재"**. → [report.md](report.md)
-> - **PART 2 — Solution A** (Qwen LoRA로 SFT→GRPO, Search-R1 방식). 진단을 그대로 공략 — 추론을 LLM 안에. **in-domain 돌파(0.469)**, 단 도메인 전이는 과적합. → [report_solution_a.md](report_solution_a.md) · [docx](report_solution_a.docx)
-
-## 결과 한눈에
-
-### In-domain (HotpotQA validation, 3 seed mean±std)
-| 방법 | answer F1 | 비고 |
-|---|---:|---|
-| Oracle (상한) | 0.557 | frozen Qwen2.5-0.5B의 천장 |
-| Naive RAG (cosine top-3) | 0.370 | 학습 없는 휴리스틱 — PART 1이 넘지 못한 벽 |
-| **PART 1: Step-wise RL** | 0.355 ± 0.012 | H1/H2 기각 — cosine 못 넘음 |
-| PART 2: SFT search (Search-R1) | 0.434 | 추론을 LLM에 → 휴리스틱 돌파 |
-| **PART 2: SFT+GRPO RL** | **0.469 ± 0.007** | RL 추가이득 +0.035 (3-seed 견고) |
-| frozen-base (cold-start) | 0.006 | SFT warmup이 필수임을 정량 입증 |
-
-### Transfer (스포츠 룰북 350문항)
-| 방법 | in-domain | sports | 변화 |
-|---|---:|---:|---:|
-| Naive (cosine) | 0.370 | **0.386** | +0.016 (견고) |
-| PART 1: Step-wise RL | 0.355 | 0.270 ± 0.038 | **−24%** (H3 기각) |
-| PART 2: SFT+GRPO RL | 0.469 | 0.313 ± 0.023 | −33% (과적합, 단 RL > SFT 유지) |
-
-→ **두 PART을 합친 핵심 통찰**: 학습 없는 cosine은 in-domain 천장이 낮지만 OOD에 견고하다. 학습된 정책은 in-domain↑이지만 OOD에 취약하다. **"학습효과 vs OOD 강건성"의 트레이드오프**가 두 PART 모두에서 정량으로 드러난다.
-
-## 가설 검증 요약
-**PART 1 (selection-only RL)**
-- **H1** (Step-wise ≫ Sparse) → **기각** (3 seed에서 answer F1 동률 0.355 vs 0.354; 단일 seed 우위는 noise)
-- **H2** (RL > cosine 휴리스틱) → **기각** (0.355 < 0.370; 단 keep 단락 2.0개로 cosine 3.0개와 동률 — precision 이점)
-- **H3** (HotpotQA → 새 도메인 transfer) → **기각** (sports -24%, random 수준까지 폭락)
-
-**PART 2 (Solution A)**
-- **HA-1** (추론을 LLM 안에 두면 selection-RL·cosine을 넘는다) → **강하게 지지** (0.355 → 0.434 → 0.469, cold-start 0.006이 SFT 기여 증명)
-- **HA-2** (RL이 SFT 위에 추가이득) → **부분 지지** (+0.035, std 0.007로 견고; 메인 held-out에선 comparison +0.14에 집중, bridge는 작고 분산 큰 신호)
-- **HA-3** (파인튜닝된 search 정책의 도메인 전이) → **음성/혼합** (sports 0.313 < cosine 0.386 — 단 RL > SFT, comparison 전이는 강함 0.507)
+**서강대학교 강화학습 수업 프로젝트**
+박두산 A72051 (팀장) · 신세정 A72058 (팀원)
+GitHub: https://github.com/doosanpark/RAG_RL
 
 ---
 
-## PART 1 — Selection-only RL (`src/`)
+## 프로젝트 개요
 
-**왜 RL 문제인가.** 기존 RAG는 보통 질문-단락 유사도 top-k를 한 번에 골라 LLM에 넘긴다(one-shot cosine retrieval). 이 방식은 질문과 직접 닮은 문서엔 강하지만, **표면적으로 닮지 않은 2차 단락(bridge evidence)을 놓치기 쉽다**. 본 PART 1은 이 선택 과정을 **순차적 의사결정**(매 step keep/drop/stop)으로 다시 보고, **이전 선택이 다음 상태와 최종 답 품질에 영향을 주는 닫힌 루프**(Agent ↔ Environment)로 정식화한 뒤 REINFORCE+baseline으로 학습한다. LLM(Qwen2.5-0.5B)은 freeze, 답 생성에만 사용.
+기존 RAG(Retrieval-Augmented Generation) 시스템은 질문과의 cosine 유사도 상위 k개 문서를 한 번에 선택해 LLM에 전달한다 (이하 **cosine 휴리스틱**, 본 보고서의 비교 기준선). 이 방식은 단순한 질문에는 잘 작동하지만, 여러 문서를 순서대로 참조해야 하는 **multi-hop 질문**에서는 중간 단계의 근거 문서를 놓치기 쉽다.
 
-**MDP 흐름.** 1 에피소드 = HotpotQA 1 샘플(후보 단락 N=10, gold 2 + distractor 8). 매 step에서 환경이 처리된 단락을 마스킹하고 상태 전이·step reward를 산출하면 agent가 action을 선택 — 이 닫힌 루프를 반복하다 **`stop_and_answer`만이 에피소드를 종료**(Horizon T ≤ 10). 종료 시 keep된 단락만 LLM에 전달돼 답이 생성되고, 그 답의 F1이 최종 보상으로 합쳐진다.
+본 프로젝트는 이 문제를 **순차적 의사결정(Sequential Decision Making)**으로 재정의하고, 강화학습으로 문서 선택 정책을 학습하는 것을 목표로 한다. 실험은 두 단계로 나뉜다.
 
-- **State** = 질문 + 누적 keep 단락 + 후보별 상태(q_sim, kept_sim, 처리여부) + step t
-- **Action** = `{keep pᵢ, drop pᵢ, stop_and_answer}` — 고정 크기 2N+1, 처리된 단락은 valid_mask로 차단
-- **Reward (v4.2)** — **두 층위로 신호 결합**:
-  - **즉시 step reward (선택 품질)**: keep 정답 +0.2 / drop 정답 −0.3 (정답 drop 최대 페널티 → recall 보존) / keep 노이즈 −0.1 / drop 노이즈 +0.05 / stop 0
-  - **종료 시 final reward (답 품질)**: `R_final = 2.0 × answer_F1 − 0.1·t` (cliff 없는 연속 보상). Return `G₀ = Σ γᵏ rₖ + γᵀ R_final`, `γ = 0.99`
-- **Policy**: 2-layer MLP(~200K params), hidden (256, 128). LLM freeze.
-- **Encoder**: sentence-transformers MiniLM-L6-v2 (384d, freeze)
-- **Algorithm**: REINFORCE + learned baseline (강의 06 범위). 본 학습 전 CartPole-v1로 3-seed sanity 통과(`avg(100ep) ≥ 195`).
-- **핵심 설계** (두 실패에 대한 인과 기반 수정):
-  - **BC warmup**: cold-start 시 정책이 "즉시 stop" 국소최적에 빠짐(빈 컨텍스트 F1=0.149 → reward 2×0.149−0.1=+0.198이 관측 평균과 정확 일치 — reward hacking 정량 포착). supporting_facts로 만든 expert로 1000 샘플 모방학습 후 RL 시작.
-  - **Lean state (32d)**: raw 임베딩(4639d)은 train 과적합(dev F1 0.19 < cosine 0.37). 유사도 기반 lean state(q_sim · kept_sim · 처리여부 · step)로 일반화 회복(dev 0.35).
+- **PART 1**: LLM은 고정(freeze)하고, 소형 MLP 정책망으로 문서 선택만 학습 (REINFORCE + Baseline)
+- **PART 2**: 정책망의 한계를 진단한 뒤, LLM 자체를 LoRA SFT → GRPO RL로 파인튜닝하여 추론 능력까지 학습 (Search-R1 방식)
 
-자세한 결과·분석 → **[report.md](report.md)** + 아래 "PART 1 상세 결과" 표.
+---
 
-## PART 2 — Solution A: 검색·추론을 LLM 안에 (`src/sol_a/`)
-PART 1의 진단("정책의 multi-hop 추론 용량 부재")을 직접 공략 — **Qwen2.5-0.5B를 LoRA로 SFT warmup → GRPO RL** 파인튜닝(Search-R1 방식). 한 assistant 턴 안에서 `<think>` → `<search>` → env가 `<information>` 주입 → ... → `<answer>` 프로토콜을 학습. "검색"은 외부 인덱스가 아니라 후보 풀(distractor 10) 내 MiniLM top-2 retrieve로 한정 — 검색서버 엔지니어링 제거.
+## 실험 결과 요약
 
-| 모델 | in-domain F1 | bridge | comparison | sports |
-|---|---:|---:|---:|---:|
-| frozen-base (cold-start) | 0.006 | 0.005 | 0.007 | 0.005 |
+### In-domain 성능 (HotpotQA validation, 3-seed mean ± std)
+
+| 방법 | Answer F1 | 비고 |
+|:--|--:|:--|
+| Oracle (정답 문서만 입력) | 0.557 | Frozen Qwen2.5-0.5B의 이론적 상한 |
+| **cosine 휴리스틱** (top-3) | 0.370 | 학습 없이 cosine 유사도로 top-3 선택 (Naive RAG) — PART 1이 넘지 못한 기준선 |
+| **PART 1: Step-wise RL** | **0.355 ± 0.012** | H1/H2 기각 — cosine 휴리스틱에 미달 |
+| PART 2: SFT search | 0.434 | 추론을 LLM 내부로 이전 → 기준선 돌파 |
+| **PART 2: SFT + GRPO RL** | **0.469 ± 0.007** | RL 추가 이득 +0.035 (3-seed 견고) |
+| Frozen base (cold-start, RL만) | 0.006 | SFT warmup 없이 RL만 적용 시 발산 → SFT 필요성 정량 입증 |
+
+### 도메인 전이 성능 (스포츠 룰북 350문항, out-of-domain)
+
+| 방법 | In-domain | Sports | 변화율 |
+|:--|--:|--:|--:|
+| **cosine 휴리스틱** (top-3) | 0.370 | 0.386 | **+4%** (견고) |
+| PART 1: Step-wise RL | 0.355 | 0.270 ± 0.038 | **−24%** (H3 기각) |
+| PART 2: SFT + GRPO RL | 0.469 | 0.313 ± 0.023 | **−33%** (과적합, 단 RL > SFT) |
+
+**핵심 통찰**: 학습 없는 cosine 검색은 in-domain 성능 상한이 낮지만 OOD(Out-of-Distribution)에 견고하다. 학습된 정책은 in-domain에서 성능이 오르지만 OOD에 취약해진다. 두 PART 모두에서 **학습 효과 vs OOD 강건성의 트레이드오프**가 정량적으로 확인된다.
+
+---
+
+## 가설 검증 결과
+
+### PART 1 (Selection-only RL)
+
+| 가설 | 결과 | 근거 |
+|:--|:--|:--|
+| H1: Step-wise reward > Sparse reward | **기각** | 3-seed answer F1 동률 (0.355 vs 0.354). Step의 우위는 단일 seed noise였음. 단, support_F1 분산은 step에서 더 작음 (±0.005 vs ±0.027) |
+| H2: RL > cosine 휴리스틱 | **기각** | 0.355 < 0.370. 단, RL은 2.0개 문서만 keep해 cosine(3.0개)보다 간결하게 유사한 F1 달성 |
+| H3: HotpotQA → 새 도메인 전이 | **기각** | Sports -24%, 랜덤 수준까지 하락 |
+
+### PART 2 (SFT + GRPO RL)
+
+| 가설 | 결과 | 근거 |
+|:--|:--|:--|
+| HA-1: 추론을 LLM 안에 두면 cosine/RL 선택기를 넘는다 | **강하게 지지** | 0.355 → 0.434 → 0.469. Cold-start 0.006이 SFT 기여를 정량 입증 |
+| HA-2: RL이 SFT 위에 추가 이득을 준다 | **부분 지지** | +0.035, std 0.007로 견고. Comparison 타입에서 특히 두드러짐 |
+| HA-3: 파인튜닝된 정책의 도메인 전이 | **부정적/혼합** | Sports 0.313 < cosine 0.386. 단 RL > SFT이고, comparison 전이는 0.507로 강함 |
+
+---
+
+## PART 1 — Selection-only RL
+
+### 문제 정의 (MDP 정식화)
+
+1 에피소드 = HotpotQA 샘플 1개 (후보 문서 N=10: gold 2개 + distractor 8개).
+매 step에서 agent가 문서 하나를 선택하고, 에피소드는 `stop_and_answer` 액션에서만 종료된다.
+
+| 구성 요소 | 정의 |
+|:--|:--|
+| **State** | 질문 + 누적 keep 문서 + 후보별 상태 (q_sim, kept_sim, 처리 여부, step t) |
+| **Action** | `keep pᵢ` / `drop pᵢ` / `stop_and_answer` (크기 2N+1, 처리된 문서는 mask 처리) |
+| **Reward** | Step reward (즉시) + Final reward (종료 시): `R_final = 2.0 × answer_F1 − 0.1·t`, γ = 0.99 |
+| **Policy** | 2-layer MLP (~200K params), LLM은 freeze하고 답변 생성에만 사용 |
+| **Encoder** | sentence-transformers MiniLM-L6-v2 (384d, freeze) |
+| **Algorithm** | REINFORCE + Learned Baseline (강의 06 범위) |
+
+### Step Reward 설계 (v4.2)
+
+```
+keep  + 정답 문서  → +0.20
+drop  + 정답 문서  → −0.30  (recall 보존을 위한 최대 페널티)
+keep  + 노이즈 문서 → −0.10
+drop  + 노이즈 문서 → +0.05
+stop_and_answer    →  0 (Final reward로 이행)
+```
+
+### 주요 설계 결정 및 근거
+
+**1. BC (Behavioral Cloning) warmup**
+Cold-start 시 정책이 "즉시 stop" 국소 최적에 수렴하는 현상이 관측됨.
+빈 컨텍스트 F1 = 0.149이고 이때 reward = 2×0.149 − 0.1 = +0.198으로, 관측 평균과 정확히 일치 → **reward hacking 정량 포착**.
+`supporting_facts` 기반 expert 시연 1,000개로 모방학습(BC) 후 RL을 시작해 이 국소 최적을 회피.
+
+**2. Lean state (32d)**
+Raw 임베딩(4,639d) 입력 시 훈련 과적합 발생 (dev F1 0.19 < cosine 0.37).
+코사인 유사도 기반 lean state(q_sim, kept_sim, 처리 여부, step)로 차원을 줄이자 일반화 회복 (dev 0.35).
+
+**3. CartPole sanity check**
+본 학습 전 CartPole-v1에서 3-seed 검증 완료 (`avg(100ep) ≥ 195`).
+
+| Seed | Solved episode | Final avg100 |
+|--:|--:|--:|
+| 42 | 242 | 196.66 |
+| 123 | 185 | 196.56 |
+| 7 | 157 | 195.47 |
+
+---
+
+## PART 2 — Solution A: LLM 내부에 추론 학습 (SFT → GRPO)
+
+### PART 1의 진단과 해결 방향
+
+PART 1의 실패 원인: **정책망(MLP)이 multi-hop 추론 용량을 갖추지 못함** (frozen LLM은 문서가 바르게 선택돼도 답을 제대로 못 냄 — oracle도 F1 0.557에 그침).
+
+해결: 선택기와 추론기를 분리하는 대신, **LLM 자체가 검색-추론 전 과정을 한 assistant 턴 내에서 수행하도록** 학습.
+
+### 학습 프로토콜
+
+LLM (Qwen2.5-0.5B-Instruct)을 LoRA로 파인튜닝.
+프로토콜은 `<think>` → `<search>` → env의 `<information>` 주입 → (반복) → `<answer>` 구조를 따름.
+검색은 외부 서버 없이 후보 풀(10개) 내 MiniLM top-2 retrieve로 한정.
+
+**Step 1: SFT warmup** (4,000 trace, 3 epoch, ~30분)
+`supporting_facts`로 자동 생성한 멀티홉 추론 trace로 기본 포맷을 학습.
+
+**Step 2: GRPO RL** (lr 3e-5, KL coef 0.01, 100 step, ~5h/seed)
+GRPO = REINFORCE + **group baseline** (질문당 G=5 rollout의 평균) + **KL 정규화**
+→ 강의 06의 baseline / variance reduction 개념의 자연스러운 확장.
+
+### 상세 결과
+
+| 모델 | In-domain F1 | Bridge | Comparison | Sports (OOD) |
+|:--|--:|--:|--:|--:|
+| Frozen base (cold-start) | 0.006 | 0.005 | 0.007 | 0.005 |
 | SFT search | 0.434 | 0.435 | 0.428 | 0.299 |
-| **RL (3-seed)** | **0.469 ± 0.007** | 0.445 ± 0.010 | **0.568 ± 0.024** | 0.313 ± 0.023 |
+| **SFT + GRPO RL (3-seed)** | **0.469 ± 0.007** | 0.445 ± 0.010 | **0.568 ± 0.024** | 0.313 ± 0.023 |
 
-- **학습 동역학**: improve → peak → drift 하락. seed7은 step100에 dev 0.354·search 1.45로 포맷 붕괴 → **dev-best 체크포인트가 step80 peak 보존** (PART 1 교훈 재확인)
-- **GRPO 위치**: GRPO = REINFORCE + **group baseline**(질문당 G=5 rollout의 mean) + **KL 정규화** — 강의 06의 baseline·variance reduction 개념의 자연스러운 확장
-- **정성 사례 (보고서 §3.3)**: 같은 검색결과를 받고도 RL이 더 정확한 답 추출. 예: "Q is for Quarry 저자의 부친" → SFT는 등장인물 "Kinsey Millhone", **RL은 정답 "C. W. Grafton"**. RL이 새로 가르친 것은 retrieval이 아니라 **"질문 의도 → 답 토큰 정렬"의 정교화**
-- 학습곡선: [results/sol_a_learning_curves.png](results/sol_a_learning_curves.png)
-- 자세한 분석 → **[report_solution_a.md](report_solution_a.md)** ([docx](report_solution_a.docx))
+**학습 동역학**: improve → peak → drift 패턴. Seed 7은 step 100에서 포맷 붕괴(dev 0.354, search 횟수 1.45).
+Dev-best 체크포인트 저장으로 peak 보존 (PART 1 교훈 재적용).
 
-### PART 2 실행
+**정성 사례**: 동일한 검색 결과를 받고도 SFT는 등장인물("Kinsey Millhone")을, RL은 정답("C. W. Grafton")을 출력.
+→ RL이 학습한 것은 새로운 검색 능력이 아니라, **질문 의도와 답 토큰 간 정렬의 정교화**.
+
+---
+
+## 환경 설정 및 실행
+
+### 사전 요구사항
+
+- OS: Windows / Linux
+- GPU: NVIDIA 8GB 이상 (CUDA 12.1)
+- Python: 3.11 (3.14는 PyTorch wheel 미지원)
+
+### 설치
+
 ```powershell
-# SFT warmup (4000 trace, 3 epoch, ~30분)
-python -m src.sol_a.sft_train --epochs 3
+# 1. 가상환경 생성 및 활성화
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
 
-# RL 3 seed (lr 3e-5, KL 0.01, 100 step — 각 ~5h, 끊김 시 --resume)
+# 2. PyTorch (CUDA 12.1) 설치
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# 3. 나머지 의존성 설치
+pip install -r requirements.txt
+```
+
+> **주의**: 시스템 Python이 3.14로 설정된 경우 `datasets`/`dill` pickle 충돌이 발생한다.
+> 항상 venv의 Python을 사용할 것. VS Code에서는 `.vscode/settings.json`으로 자동 활성화됨.
+
+### PART 1 실행
+
+```powershell
+# CartPole sanity check (본 학습 전 필수)
+python -m src.train_cartpole --seed 42 --max-episodes 500
+
+# Baseline 평가 (학습 전)
+python -m src.run_eval --variant top_k_sim --k 3 --n 200   # Naive RAG
+python -m src.run_eval --variant oracle    --n 200          # 상한
+python -m src.run_eval --variant random    --k 3 --n 200    # 하한
+
+# 본 학습 (3-seed)
 foreach ($s in 42,123,7) {
-  python -m src.sol_a.grpo_train --steps 100 --lr 3e-5 --kl-coef 0.01 --seed $s `
-    --out models/sol_a/rl_s$s
+  python -m src.train_rag --seed $s --n-episodes 2500 --use-llm --no-wandb `
+    --lr-policy 1e-4 --gamma 0.99 --bc-warmup-samples 1000 --batch-episodes 8 `
+    --dev-eval-every 250 --weight-decay 1e-4         # step-wise reward
+  python -m src.train_rag --seed $s --no-step-reward  # sparse reward (ablation)
 }
 
-# 최종 평가 (held-out: val[200:400], dev[0:64]와 disjoint) + 3-seed 집계
-python -m src.sol_a.eval_a --adapter models/sol_a/rl_s42/best --dataset hotpot --n 200 --start 200
-python -m src.sol_a.eval_a --adapter models/sol_a/rl_s42/best --dataset sports
-python -m src.sol_a.aggregate_a
+# 평가 및 결과 집계
+python -m src.run_eval --variant rl --ckpt models/step_seed42_best.pt --n 200
+python -m src.aggregate_results   # results/table1_3seed.json + learning_curves.png
 ```
-중단 시 이어하기: `--resume models/sol_a/rl_s42/ckpt` (adapter + optimizer + step + RNG 복원)
 
-## 학습된 모델 — 다운로드
+### PART 2 실행
 
-PART 1·PART 2의 모든 학습 산출물을 **단일 zip(~40 MB)으로 묶어 제공**합니다.
+```powershell
+# SFT warmup (~30분)
+python -m src.sol_a.sft_train --epochs 3
 
-### ⬇ 다운로드
-**[model_releases/rag_rl_checkpoints.zip](https://github.com/doosanpark/RAG_RL/raw/main/model_releases/rag_rl_checkpoints.zip)** (40.6 MB, 33 파일, GitHub raw 직접 다운로드)
+# GRPO RL (seed당 ~5시간, 중단 시 --resume models/sol_a/rl_s42_v2/ckpt 로 재개)
+foreach ($s in 42,123,7) {
+  python -m src.sol_a.grpo_train --steps 100 --lr 3e-5 --kl-coef 0.01 --seed $s `
+    --out models/sol_a/rl_s${s}_v2
+}
 
-포함 내역:
+# 평가 (held-out: val[200:400], dev[0:64]와 disjoint)
+python -m src.sol_a.eval_a --adapter models/sol_a/rl_s42_v2/best --dataset hotpot --n 200 --start 200
+python -m src.sol_a.eval_a --adapter models/sol_a/rl_s42_v2/best --dataset sports
+python -m src.sol_a.aggregate_a   # 3-seed 평균 ± 표준편차 집계
+```
 
-| 단계 | zip 내 경로 | 형식 | 크기 |
-|---|---|---|---|
+### 대화형 데모
+
+```powershell
+# HotpotQA 샘플로 질문하기
+python -m src.ask
+
+# 직접 문서를 입력해 테스트
+python -m src.ask --mode passages
+
+# 학습된 RL 정책으로 문서 선택
+python -m src.ask --policy rl --ckpt models/step_seed42_final.pt
+```
+
+---
+
+## 학습된 모델 다운로드
+
+모든 체크포인트를 단일 zip (~40 MB)으로 제공.
+
+**[model_releases/rag_rl_checkpoints.zip](https://github.com/doosanpark/RAG_RL/raw/main/model_releases/rag_rl_checkpoints.zip)**
+
+| 단계 | 경로 | 형식 | 크기 |
+|:--|:--|:--|:--|
 | PART 2 SFT (LoRA warmup) | `part2_sft/` | PEFT LoRA adapter | 8.6 MB |
 | PART 2 RL seed 42 (dev-best) | `part2_rl_s42/` | PEFT LoRA adapter + history.json | 8.6 MB |
-| PART 2 RL seed 123 (dev-best) | `part2_rl_s123/` | PEFT LoRA adapter + history.json | 8.6 MB |
-| PART 2 RL seed 7 (dev-best) | `part2_rl_s7/` | PEFT LoRA adapter + history.json | 8.6 MB |
-| PART 1 Step-wise RL seed 42/123/7 | `part1_step_seed{42,123,7}_best.pt` | PyTorch state_dict | ~1 MB × 3 |
-| PART 1 Sparse RL seed 42/123/7 (ablation) | `part1_sparse_seed{42,123,7}_best.pt` | PyTorch state_dict | ~1 MB × 3 |
+| PART 2 RL seed 123 (dev-best) | `part2_rl_s123/` | 동일 | 8.6 MB |
+| PART 2 RL seed 7 (dev-best) | `part2_rl_s7/` | 동일 | 8.6 MB |
+| PART 1 Step-wise RL (seed 42/123/7) | `part1_step_seed{42,123,7}_best.pt` | PyTorch state_dict | ~1 MB × 3 |
+| PART 1 Sparse RL (seed 42/123/7, ablation) | `part1_sparse_seed{42,123,7}_best.pt` | 동일 | ~1 MB × 3 |
 
-### 사용 예
 ```python
-# PART 2 RL 어댑터 로드 (압축 해제 후)
+# PART 2 RL 어댑터 로드
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 import torch
 
 tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
 base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct", dtype=torch.bfloat16).cuda()
-model = PeftModel.from_pretrained(base, "part2_rl_s42")  # ↑ zip에서 푼 경로
+model = PeftModel.from_pretrained(base, "part2_rl_s42")
 ```
 
 ```python
-# PART 1 Step-wise RL 정책망 로드
+# PART 1 정책망 로드
 import torch
 ckpt = torch.load("part1_step_seed42_best.pt", weights_only=False)
-# state_dict / config 등 포함 (자세한 키는 src/agent.py 참고)
+# 상세 키는 src/agent.py 참고
 ```
 
-### 대안 1 — HuggingFace Hub (개별 업로드)
-`huggingface-cli login` 후 `python -m src.sol_a.push_hub` 실행 시 자동 생성:
-- `https://huggingface.co/doosanpark/rag-rl-sol-a-sft`
-- `https://huggingface.co/doosanpark/rag-rl-sol-a-rl-s42`
-- `https://huggingface.co/doosanpark/rag-rl-sol-a-rl-s123`
-- `https://huggingface.co/doosanpark/rag-rl-sol-a-rl-s7`
+---
 
-### 대안 2 — 직접 재학습
-어댑터는 SFT→RL 파이프라인으로 재현 가능 (아래 "PART 2 실행" 명령 참고). SFT 약 30분, RL은 seed당 ~5h.
+## 프로젝트 구조
 
-## Setup
-
-### 0. 사전 요구
-- Windows / Linux, NVIDIA GPU (8GB+), CUDA 12.1 드라이버
-- Python 3.11 (3.14는 PyTorch wheel 미지원이라 사용 X)
-
-### 1. venv 생성 + 활성화
-```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-### 2. PyTorch (CUDA 12.1) 설치
-```powershell
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-```
-
-### 3. 나머지 의존성
-```powershell
-pip install -r requirements.txt
-```
-
-> **중요 — 항상 venv의 Python을 쓸 것.** 시스템 `python`이 3.14로 잡히면
-> `datasets`/`dill` pickle 충돌(`Pickler._batch_setitems() takes 2 positional...`)이 난다.
-> VS Code 통합 터미널은 [.vscode/settings.json](.vscode/settings.json) 덕분에 자동으로
-> venv를 활성화한다 (새 터미널 열면 프롬프트에 `(.venv)` 표시). 일반 PowerShell 창에서는
-> 매 세션 한 번 `.\.venv\Scripts\Activate.ps1` 또는 명령마다 `.\.venv\Scripts\python.exe`를 쓴다.
->
-> 현재 어떤 Python이 잡히는지 확인: `python -c "import sys; print(sys.version)"` → `3.11.0` 이어야 정상.
-
-### 4. 환경 검증
-```powershell
-python -m src.verify_env
-```
-출력에서 `CUDA avail. : True` 확인.
-
-### 5. HotpotQA 다운로드 + 구조 확인
-```powershell
-python -m src.download_data
-```
-
-> 의존성은 2026.05 기준 검증 조합으로 핀되어 있다 (numpy 1.26 / pyarrow 17 /
-> pandas 2.3 / datasets 2.21). numpy 2.x·pyarrow 24·pandas 3.x 조합은 Windows에서
-> sentence-transformers import 시 access violation(0xC0000005)을 일으켜 회피한다.
-
-## 사용법 (직접 실행해보기)
-
-> 아래 명령은 모두 venv가 활성화된 상태(`(.venv)` 프롬프트)를 가정한다.
-> 활성화가 안 됐다면 `python` 대신 `.\.venv\Scripts\python.exe`로 바꿔 친다.
-
-### A. 대화형 질문 — `src.ask`
-프롬프트에 질문을 입력하면 검색 → 답변 → (정답이 있으면) F1까지 보여준다.
-```powershell
-# hotpot 모드: 질문만 입력하면 가장 비슷한 HotpotQA 샘플의 단락을 검색 풀로 사용
-python -m src.ask
-
-python -m src.ask --k 5                 # top-5 검색
-python -m src.ask --pool-size 1000      # 질문 매칭 풀 확대 (매칭 정확도↑)
-
-# passages 모드: 질문 + 단락을 직접 입력 (자기 도메인 텍스트 테스트용)
-python -m src.ask --mode passages
-
-# 학습된 RL 정책으로 단락 selection (학습 완료 후)
-python -m src.ask --policy rl --ckpt models/step_seed42_final.pt
-```
-종료: 빈 입력 / `q` / `quit` / `exit` / Ctrl+C.
-
-### B. 한 샘플 자세히 보기 — `src.demo`
-한 HotpotQA 샘플에 대해 후보 단락, 검색 결과, 답변, F1을 한 화면에 보여준다.
-```powershell
-python -m src.demo                       # 랜덤 1 샘플
-python -m src.demo --index 3             # validation[3]
-python -m src.demo --index 3 --variant use_all   # 같은 샘플, 단락 전부 사용
-python -m src.demo --index 3 --variant oracle    # 같은 샘플, 정답 단락만 (상한)
-# 직접 입력
-python -m src.demo --question "..." --passages "단락1" "단락2" "단락3"
-```
-같은 `--index`로 `top_k_sim` / `use_all` / `oracle`을 비교하면 검색 차이가 답변에
-어떻게 영향을 주는지 직접 확인할 수 있다.
-
-### C. 정량 평가 — `src.run_eval`
-검증셋 N개에 대해 평균 F1·EM·support_F1을 계산한다. 모든 변형이 동일 인터페이스라 1:1 비교된다.
-```powershell
-# 학습 없는 baseline
-python -m src.run_eval --variant top_k_sim --k 3 --n 200   # = Naive RAG
-python -m src.run_eval --variant use_all   --n 200
-python -m src.run_eval --variant oracle    --n 200          # 상한
-python -m src.run_eval --variant random    --k 3 --n 200    # 하한
-
-# 학습된 RL 정책
-python -m src.run_eval --variant rl --ckpt models/step_seed42_final.pt --policy greedy --n 200
-```
-`--n`은 평가 샘플 수(클수록 신뢰도↑/느림). 빠른 확인은 20, 표준은 200, 보고서용은 500~1000.
-
-## 디렉토리 구조
 ```
 src/
-  rl_types.py        Action / StepRecord / Trajectory 타입
-  rewards.py         v4.2 reward + answer F1
-  env.py             RAGEnv (gym 스타일 MDP)
-  agent.py           REINFORCE + learned baseline
-  state_encoder.py   sentence-transformers + state→벡터
-  llm.py             Qwen2.5-0.5B answerer
-  train_cartpole.py  CartPole sanity check
-  train_rag.py       HotpotQA 본 학습 (step / sparse)
-  evaluate.py        범용 평가기
-  run_eval.py        통합 평가 entrypoint (baseline + RL)
-  demo.py            한 샘플 데모
-  ask.py             대화형 질문 REPL
+  # PART 1 — Selection-only RL
+  rl_types.py          Action / StepRecord / Trajectory 타입 정의
+  rewards.py           v4.2 reward 함수 + answer F1 계산
+  env.py               RAGEnv (gym 스타일 MDP)
+  agent.py             REINFORCE + learned baseline
+  state_encoder.py     sentence-transformers 기반 lean state(32d) 인코딩
+  llm.py               Qwen2.5-0.5B 답변 생성 (freeze)
+  train_cartpole.py    CartPole sanity check
+  train_rag.py         HotpotQA 본 학습 (step-wise / sparse)
+  evaluate.py          범용 평가기
+  run_eval.py          통합 평가 엔트리포인트
+  demo.py              단일 샘플 시각화 데모
+  ask.py               대화형 질문 인터페이스
   baselines/
-    naive_rag.py     use_all / top_k_sim / random / oracle
+    naive_rag.py       use_all / top_k_sim / random / oracle
+  # PART 2 — Solution A (Search-R1 SFT → GRPO)
+  sol_a/
+    format_utils.py    프로토콜 태그 · 파서 · MiniLM 검색기
+    hotpot_data.py     HotpotQA 구조화 로더
+    build_sft_data.py  supporting_facts → 멀티홉 SFT trace 생성
+    sft_train.py       LoRA SFT warmup
+    search_env.py      멀티턴 search rollout (</search> 정지 + 결과 주입)
+    reward_a.py        outcome F1 + format 보상
+    grpo_train.py      GRPO 학습 (KL + group baseline, --resume 지원)
+    eval_a.py          in-domain / sports 평가
+    aggregate_a.py     3-seed 결과 집계
+    extract_cases.py   정성 사례 추출 (SFT vs RL paired)
+    plot_curves.py     dev F1 학습 곡선 plot
+    make_release.py    모델 zip 빌드
+    push_hub.py        HuggingFace Hub 업로드 스크립트
+    md_to_docx.py      markdown 보고서 → .docx 변환
+
 data/
-  raw/         원본 HotpotQA 등 (gitignored)
-  processed/   인코딩된 임베딩 / 토큰
-  eval/        보드게임 + 근로기준법 평가셋
-models/      체크포인트 (gitignored)
-results/     Table 1, learning curves, trajectory dump
-logs/        설치 / 실행 로그, W&B export
-tests/       unit test (env, reward) — 24개
-.vscode/     통합 터미널 venv 자동 활성화 설정
+  raw/                 원본 HotpotQA 캐시 (gitignored)
+  processed/           임베딩 캐시
+  eval/                sports.json (스포츠 룰북 350문항, OOD 전이 평가셋)
+  sol_a/               PART 2 SFT trace (sft_train.jsonl · sft_val.jsonl)
+
+models/                체크포인트 (gitignored)
+  step_seed{42,123,7}_*.pt        PART 1 step-wise RL
+  sparse_seed{42,123,7}_*.pt      PART 1 sparse RL (ablation)
+  sol_a/sft/best/                 PART 2 SFT 어댑터
+  sol_a/rl_s{42,123,7}_v2/best/   PART 2 GRPO RL 어댑터 (공격적 설정, 본 실험)
+
+model_releases/
+  rag_rl_checkpoints.zip          배포용 통합 zip (~40 MB, 33 파일)
+
+results/                          Table 1, 학습 곡선, 평가 JSON, rollout 덤프
+tests/                            단위 테스트 24개 (env, reward)
 ```
 
-## 진행 상황
-**PART 1 (Selection-only RL)**
-- [x] Phase 1: 환경 셋업 + 데이터 다운로드
-- [x] Phase 2: RAGEnv class + reward 함수 + unit test (24/24 green)
-- [x] Phase 3: REINFORCE+Baseline + CartPole sanity check (3 seeds 통과)
-- [x] Phase 4: HotpotQA 본 학습 (3 seed, step + sparse) — BC warmup + lean state
-- [x] Phase 5: baseline — Naive RAG 4종 + Sparse RL (Classification은 범위 제외)
-- [x] Phase 6: Table 1 + 학습곡선 + 스포츠 transfer + **보고서([report.md](report.md))**
+---
 
-**PART 2 (Solution A — Search-R1 SFT→GRPO)**
-- [x] A1: SFT trace 자동 생성 (supporting_facts → 멀티홉 trace 4000+400)
-- [x] A2: LoRA SFT warmup (val_loss 0.113 수렴)
-- [x] A3: 멀티턴 search env (`</search>` 정지 + retrieve 주입) + reward (F1+format)
-- [x] A4: GRPO smoke (OOM 없음, --resume 검증)
-- [x] A5: 3-seed RL 학습 (lr 3e-5, KL 0.01, dev-best — seed7 step100 붕괴 방어)
-- [x] A6: held-out 3-seed 집계 + 정성 사례 분석 ([report_solution_a.md](report_solution_a.md))
-- [x] A7: 보고서 (md + docx) + README 두 PART 통합
+## 데이터 출처 및 라이선스
 
-## PART 1 상세 결과 (3 seeds: 42/123/7, validation n=200)
+- **HotpotQA distractor set**: CC BY-SA 4.0
+- **스포츠 룰북 350문항 (자체 구축)**: 배구, 탁구, 배드민턴, 미식축구, 축구, 농구, 야구, 하키 공식 룰 텍스트를 HotpotQA 포맷으로 직접 라벨링 (OOD 전이 평가 전용)
 
-| 방법 | answer_F1 | support_F1 | EM | avg_kept | 비고 |
-|:---|---:|---:|---:|---:|:---|
-| Oracle (정답 단락만) | 0.557 | 1.000 | 0.420 | 2.0 | 상한 |
-| Naive RAG (cosine top-3) | 0.370 | 0.582 | 0.280 | 3.0 | 학습 없는 강한 베이스라인 |
-| use_all | 0.367 | 0.340 | 0.275 | 9.9 | |
-| **Step-wise RL (제안)** | 0.355 ± 0.012 | 0.533 ± 0.005 | 0.262 | 2.0 | |
-| Sparse RL | 0.354 ± 0.002 | 0.512 ± 0.027 | 0.267 | 2.0 | ablation |
-| random | 0.275 | 0.258 | 0.200 | 3.0 | 하한 |
+---
 
-곡선(3-seed mean±std): [results/learning_curves.png](results/learning_curves.png), 표: [results/table1_3seed.json](results/table1_3seed.json)
+## 결과 시각화
 
-**핵심 발견 (정직한 분석)**
-1. **일반화가 표현에 좌우됨**: 정책 입력에 raw 임베딩(4639-d)을 쓰면 train 과적합(dev F1 0.19 < cosine 0.37). cosine 유사도 기반 **lean state(32-d)**로 바꾸자 dev 일반화가 살아남(BC만으로 0.19→0.29, 학습 후 0.31~0.35).
-2. **H1 (step vs sparse) — 지지되지 않음**: 3 seed에서 answer_F1 **동률**(0.355 vs 0.354). 단일 seed(42)에서 보였던 step 우위는 noise였고 3 seed로 사라짐. 유일하게 견고한 관찰: **support_F1의 seed 간 분산이 step에서 훨씬 작음**(±0.005 vs ±0.027) — dense reward가 선택 품질을 더 *일관적*으로 만듦.
-3. **H2 (RL vs Naive)**: RL은 cosine 휴리스틱을 못 넘음(0.355 vs 0.370). 단 RL은 단락 2.0개만 keep해 cosine(3.0개)보다 **간결**하게 비슷한 F1 — precision 측면 이점.
-4. **reward hacking 진단**: BC warmup 없이 학습 시 정책이 "즉시 stop"으로 수렴(빈 컨텍스트 F1=0.149 → reward +0.20 정확 일치). BC warmup이 이 국소최적을 회피.
-5. **천장은 LLM**: oracle도 0.557 — frozen Qwen2.5-0.5B가 병목. selection 개선이 answer F1로 전이되지 않음.
-6. **REINFORCE 불안정성**: 학습이 dev F1에서 plateau 후 후반 drift → dev-best 체크포인트로 peak 보존.
-
-### Phase 4 재현 (3 seed)
-```powershell
-foreach ($s in 42,123,7) {
-  python -m src.train_rag --seed $s --n-episodes 2500 --use-llm --no-wandb `
-    --lr-policy 1e-4 --gamma 0.99 --bc-warmup-samples 1000 --batch-episodes 8 `
-    --dev-eval-every 250 --weight-decay 1e-4                       # step-wise
-  python -m src.train_rag --seed $s --no-step-reward ...같은옵션...  # sparse
-  python -m src.run_eval --variant rl --ckpt models/step_seed$s`_best.pt --n 200
-  python -m src.run_eval --variant rl --ckpt models/sparse_seed$s`_best.pt --n 200
-}
-python -m src.aggregate_results   # table1_3seed.json + learning_curves.png (mean±std)
-```
-
-## 재현
-
-### CartPole sanity check (Phase 3)
-```powershell
-python -m src.train_cartpole --seed 42 --max-episodes 500
-python -m src.train_cartpole --seed 123 --max-episodes 500
-python -m src.train_cartpole --seed 7   --max-episodes 500
-python -m src.plot_cartpole
-```
-결과: 3 seed 모두 `avg(100ep) >= 195` 통과.
-
-| seed | solved episode | final avg100 |
-|-----:|---------------:|-------------:|
-| 42   |            242 |       196.66 |
-| 123  |            185 |       196.56 |
-| 7    |            157 |       195.47 |
-
-곡선: [results/cartpole_curve.png](results/cartpole_curve.png).
-
-**통과한 hyperparam**:
-- `lr_policy=1e-3`, `lr_value=1e-3` (Adam)
-- `gamma=0.99`
-- `hidden_dims=(256, 128)` (policy/value 공통)
-- `grad_clip=1.0`
-- `normalize_advantage=True` (trajectory 내 z-score)
-- baseline: 학습 baseline (raw return 타깃으로 MSE)
-
-### 학습 전 baseline (HotpotQA validation, n=200)
-```powershell
-python -m src.run_eval --variant oracle    --n 200
-python -m src.run_eval --variant top_k_sim --k 3 --n 200
-python -m src.run_eval --variant use_all   --n 200
-python -m src.run_eval --variant random    --k 3 --n 200
-python -m src.summarize_baselines          # 표 + results/baseline_table.csv
-```
-
-| variant | answer_F1 | EM | support_F1 | avg_kept | 의미 |
-|:---|---:|---:|---:|---:|:---|
-| oracle | 0.557 | 0.420 | 1.000 | 2.0 | 정답 단락만 — RL 상한 |
-| top_k_sim (k=3) | 0.370 | 0.280 | 0.582 | 3.0 | **Naive RAG** (학습 후 넘어야 할 기준) |
-| use_all | 0.367 | 0.275 | 0.340 | 9.9 | 후보 전부 |
-| random (k=3) | 0.275 | 0.200 | 0.258 | 3.0 | 무작위 — 하한 |
-
-- selection의 잠재 이득(상한−하한): **0.282**.
-- RL이 메워야 할 마진(상한−Naive): **0.187**.
-- `comparison` 타입은 격차가 작고, `bridge`(다중 hop) 타입에서 RL 이득이 클 것으로 예상.
-
-## 라이센스 / 데이터 출처
-- HotpotQA distractor: CC BY-SA 4.0
-- 스포츠 룰북 350문항 (자체 구축): 배구·탁구·배드민턴·미식축구·축구·농구·야구·하키 각 종목 공식 룰 텍스트를 HotpotQA 포맷으로 라벨링 (transfer 평가용)
+- PART 1 학습 곡선: [results/learning_curves.png](results/learning_curves.png)
+- PART 2 학습 곡선: [results/sol_a_learning_curves.png](results/sol_a_learning_curves.png)
+- CartPole sanity 곡선: [results/cartpole_curve.png](results/cartpole_curve.png)
+- PART 1 결과 표: [results/table1_3seed.json](results/table1_3seed.json) · [results/baseline_table.csv](results/baseline_table.csv)
+- PART 2 결과 집계: [results/sol_a_summary.json](results/sol_a_summary.json)
+- 정성 사례 분석: [results/sol_a_qualitative_cases.md](results/sol_a_qualitative_cases.md)

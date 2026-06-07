@@ -93,7 +93,10 @@
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe -u -X utf8 -m src.sol_a.improve_pptx)",
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe -u -X utf8 -m src.sol_a.build_v3)",
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .\\\\.venv\\\\Scripts\\\\python.exe -u -X utf8 -m src.sol_a.make_release; echo \"\"; ls model_releases\\\\)",
-      "Bash(grep -nE \"^#{1,3} \" README.md)"
+      "Bash(grep -nE \"^#{1,3} \" README.md)",
+      "Bash(ls -la *.md *.docx)",
+      "Bash(grep -n \"report_solution_a\" README.md)",
+      "Bash(grep -n \"report_solution_a\" src/sol_a/md_to_docx.py)"
     ],
     "additionalDirectories": [
       "c:\\Users\\erid3\\Documents\\workspace\\RAG_RL"
